@@ -1,0 +1,10 @@
+node_modules
+dist
+coverage
+.git
+.github
+*.md
+.eslintrc.json
+src/**/*.test.js
+.vscode
+.DS_Store

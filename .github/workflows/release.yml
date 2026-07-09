@@ -1,4 +1,4 @@
-name: CD - Deploy to Azure Storage Static Website
+name: CD - Build, Push and Deploy to Azure Container Apps
 
 on:
   # push:
@@ -9,9 +9,12 @@ permissions:
   id-token: write
   contents: read
 
+env:
+  IMAGE_NAME: webapp-demo
+
 jobs:
-  build:
-    name: Build site
+  test:
+    name: Run tests
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -29,26 +32,16 @@ jobs:
       - name: Run tests
         run: npm run test
 
-      - name: Build
-        run: npm run build
-
-      - name: Upload build artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: dist
-          path: dist/
-
-  deploy:
-    name: Deploy to Azure Storage
-    needs: build
+  build-and-push:
+    name: Build and push image to ACR
+    needs: test
     runs-on: ubuntu-latest
     environment: production
+    outputs:
+      image: ${{ steps.vars.outputs.image }}
     steps:
-      - name: Download build artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: dist
-          path: dist
+      - name: Checkout
+        uses: actions/checkout@v4
 
       - name: Login to Azure
         run: |
@@ -61,57 +54,134 @@ jobs:
           az account set \
             --subscription "${{ secrets.AZURE_SUBSCRIPTION_ID }}"
 
-      - name: Upload site
+      - name: Set image variables
+        id: vars
         run: |
-          az storage blob upload-batch \
-            --account-name "${{ vars.AZURE_STORAGE_ACCOUNT_NAME }}" \
-            --auth-mode login \
-            -s dist \
-            -d '$web' \
-            --overwrite
+          ACR_LOGIN_SERVER=$(az acr show \
+            --name "${{ vars.AZURE_ACR_NAME }}" \
+            --query loginServer -o tsv)
+          IMAGE="$ACR_LOGIN_SERVER/${{ env.IMAGE_NAME }}:${{ github.sha }}"
+          echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
 
-      - name: Purge CDN
-        if: ${{ vars.AZURE_CDN_ENDPOINT_NAME != '' }}
+      # Compila y publica la imagen directamente en Azure Container Registry,
+      # sin necesidad de Docker instalado en el runner.
+      - name: Build & push image (az acr build)
         run: |
-          az cdn endpoint purge \
-            --resource-group "${{ vars.AZURE_RESOURCE_GROUP }}" \
-            --profile-name "${{ vars.AZURE_CDN_PROFILE_NAME }}" \
-            --name "${{ vars.AZURE_CDN_ENDPOINT_NAME }}" \
-            --content-paths "/*"
+          az acr build \
+            --registry "${{ vars.AZURE_ACR_NAME }}" \
+            --image "${{ env.IMAGE_NAME }}:${{ github.sha }}" \
+            --image "${{ env.IMAGE_NAME }}:latest" \
+            .
 
-      - name: Show website URL
+  deploy:
+    name: Deploy to Azure Container Apps
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Login to Azure
         run: |
-          WEBSITE_URL=$(az storage account show \
-            --name "${{ vars.AZURE_STORAGE_ACCOUNT_NAME }}" \
+          az login \
+            --service-principal \
+            --username "${{ secrets.AZURE_CLIENT_ID }}" \
+            --password "${{ secrets.AZURE_CLIENT_SECRET }}" \
+            --tenant "${{ secrets.AZURE_TENANT_ID }}"
+
+          az account set \
+            --subscription "${{ secrets.AZURE_SUBSCRIPTION_ID }}"
+
+      - name: Install Container Apps extension
+        run: az extension add --name containerapp --upgrade -y
+
+      - name: Get ACR credentials
+        id: acr
+        run: |
+          ACR_LOGIN_SERVER=$(az acr show \
+            --name "${{ vars.AZURE_ACR_NAME }}" \
+            --query loginServer -o tsv)
+          ACR_USERNAME=$(az acr credential show \
+            --name "${{ vars.AZURE_ACR_NAME }}" \
+            --query username -o tsv)
+          ACR_PASSWORD=$(az acr credential show \
+            --name "${{ vars.AZURE_ACR_NAME }}" \
+            --query "passwords[0].value" -o tsv)
+
+          echo "login_server=$ACR_LOGIN_SERVER" >> "$GITHUB_OUTPUT"
+          echo "::add-mask::$ACR_PASSWORD"
+          echo "username=$ACR_USERNAME" >> "$GITHUB_OUTPUT"
+          echo "password=$ACR_PASSWORD" >> "$GITHUB_OUTPUT"
+
+      # Crea la Container App si no existe todavía, o actualiza la imagen si ya existe.
+      - name: Create or update Container App
+        run: |
+          IMAGE="${{ needs.build-and-push.outputs.image }}"
+
+          if az containerapp show \
+              --name "${{ vars.AZURE_CONTAINERAPP_NAME }}" \
+              --resource-group "${{ vars.AZURE_RESOURCE_GROUP }}" &>/dev/null; then
+
+            echo "La Container App ya existe: actualizando imagen..."
+            az containerapp update \
+              --name "${{ vars.AZURE_CONTAINERAPP_NAME }}" \
+              --resource-group "${{ vars.AZURE_RESOURCE_GROUP }}" \
+              --image "$IMAGE"
+
+          else
+
+            echo "La Container App no existe: creándola..."
+            az containerapp create \
+              --name "${{ vars.AZURE_CONTAINERAPP_NAME }}" \
+              --resource-group "${{ vars.AZURE_RESOURCE_GROUP }}" \
+              --environment "${{ vars.AZURE_CONTAINERAPP_ENV }}" \
+              --image "$IMAGE" \
+              --registry-server "${{ steps.acr.outputs.login_server }}" \
+              --registry-username "${{ steps.acr.outputs.username }}" \
+              --registry-password "${{ steps.acr.outputs.password }}" \
+              --target-port 8080 \
+              --ingress external \
+              --min-replicas 0 \
+              --max-replicas 3 \
+              --cpu 0.25 --memory 0.5Gi
+          fi
+
+      - name: Show Container App URL
+        run: |
+          APP_URL=$(az containerapp show \
+            --name "${{ vars.AZURE_CONTAINERAPP_NAME }}" \
             --resource-group "${{ vars.AZURE_RESOURCE_GROUP }}" \
-            --query "primaryEndpoints.web" \
+            --query "properties.configuration.ingress.fqdn" \
             -o tsv)
 
-          echo "## 🚀 Website deployed" >> $GITHUB_STEP_SUMMARY
+          echo "## 🚀 Container desplegado" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "🌐 URL: $WEBSITE_URL" >> $GITHUB_STEP_SUMMARY
+          echo "🌐 URL: https://$APP_URL" >> $GITHUB_STEP_SUMMARY
+          echo "🖼️ Imagen: ${{ needs.build-and-push.outputs.image }}" >> $GITHUB_STEP_SUMMARY
 
-          echo "Website URL: $WEBSITE_URL"
-          
+          echo "Container App URL: https://$APP_URL"
 
-## CREAR IAC
+## CREAR INFRAESTRUCTURA BASE (ejecutar una sola vez, manualmente o vía deploy-azure.sh)
 
 # # Crear grupo de recursos
 # az group create \
 #   --name rg-webapp-demo \
-#   --location eastus
+#   --location westeurope
 
-# # Crear Storage Account
-# az storage account create \
-#   --name testdemo12345 \
+# # Crear Azure Container Registry
+# az acr create \
 #   --resource-group rg-webapp-demo \
-#   --location eastus \
-#   --sku Standard_LRS \
-#   --kind StorageV2
+#   --name <nombre-unico-acr> \
+#   --sku Basic \
+#   --admin-enabled true
 
-# # Habilitar Static Website
-# az storage blob service-properties update \
-#   --account-name testdemo12345 \
-#   --static-website \
-#   --index-document index.html \
-#   --404-document index.html
+# # Registrar providers y crear el entorno de Container Apps
+# az extension add --name containerapp --upgrade
+# az provider register --namespace Microsoft.App
+# az provider register --namespace Microsoft.OperationalInsights
+# az containerapp env create \
+#   --name cae-webapp-demo \
+#   --resource-group rg-webapp-demo \
+#   --location westeurope
+
+# Variables de repositorio necesarias (Settings > Secrets and variables > Actions):
+#   Secrets: AZURE_CLIENT_ID, AZURE_CLIENT_SECRET, AZURE_TENANT_ID, AZURE_SUBSCRIPTION_ID
+#   Vars:    AZURE_RESOURCE_GROUP, AZURE_ACR_NAME, AZURE_CONTAINERAPP_ENV, AZURE_CONTAINERAPP_NAME
