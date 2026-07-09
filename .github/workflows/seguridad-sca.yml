@@ -1,0 +1,34 @@
+name: GHAS - Dependecy Review
+
+on:
+  # push:
+  #   branches: [main]
+  pull_request:
+    branches: 
+      - main
+      - develop
+  # schedule:
+  #   # Analisis programado semanal (lunes 03:00 UTC)
+  #   - cron: '0 3 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  security-events: write
+  
+  actions: read
+###demo
+jobs:
+  dependency-review:
+    name: Dependency Review
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Run Dependency Review
+        uses: actions/dependency-review-action@v4
+        with:
+          fail-on-severity: 'high'
+          comment-sumary-in-pr: true
