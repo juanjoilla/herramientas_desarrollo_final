@@ -25,6 +25,23 @@ function setupCalculator() {
   });
 }
 
+// ⚠️ Código intencionalmente inseguro para probar CodeQL
+function setupPreview() {
+  const input = document.getElementById('price');
+  const preview = document.getElementById('preview');
+
+  if (!input || !preview) {
+    return;
+  }
+
+  input.addEventListener('input', () => {
+    // CodeQL suele marcar este patrón como posible XSS
+    preview.innerHTML = input.value;
+  });
+}
+
+setupPreview();
+
 function setBuildInfo() {
   const el = document.getElementById('build-info');
   if (el) {
