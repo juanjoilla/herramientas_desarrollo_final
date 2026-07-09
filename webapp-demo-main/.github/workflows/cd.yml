@@ -1,0 +1,117 @@
+name: CD - Deploy to Azure Storage Static Website
+
+on:
+  # push:
+  #   branches: [main]
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  build:
+    name: Build site
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20.x'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run tests
+        run: npm run test
+
+      - name: Build
+        run: npm run build
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  deploy:
+    name: Deploy to Azure Storage
+    needs: build
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Download build artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
+
+      - name: Login to Azure
+        run: |
+          az login \
+            --service-principal \
+            --username "${{ secrets.AZURE_CLIENT_ID }}" \
+            --password "${{ secrets.AZURE_CLIENT_SECRET }}" \
+            --tenant "${{ secrets.AZURE_TENANT_ID }}"
+
+          az account set \
+            --subscription "${{ secrets.AZURE_SUBSCRIPTION_ID }}"
+
+      - name: Upload site
+        run: |
+          az storage blob upload-batch \
+            --account-name "${{ vars.AZURE_STORAGE_ACCOUNT_NAME }}" \
+            --auth-mode login \
+            -s dist \
+            -d '$web' \
+            --overwrite
+
+      - name: Purge CDN
+        if: ${{ vars.AZURE_CDN_ENDPOINT_NAME != '' }}
+        run: |
+          az cdn endpoint purge \
+            --resource-group "${{ vars.AZURE_RESOURCE_GROUP }}" \
+            --profile-name "${{ vars.AZURE_CDN_PROFILE_NAME }}" \
+            --name "${{ vars.AZURE_CDN_ENDPOINT_NAME }}" \
+            --content-paths "/*"
+
+      - name: Show website URL
+        run: |
+          WEBSITE_URL=$(az storage account show \
+            --name "${{ vars.AZURE_STORAGE_ACCOUNT_NAME }}" \
+            --resource-group "${{ vars.AZURE_RESOURCE_GROUP }}" \
+            --query "primaryEndpoints.web" \
+            -o tsv)
+
+          echo "## 🚀 Website deployed" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "🌐 URL: $WEBSITE_URL" >> $GITHUB_STEP_SUMMARY
+
+          echo "Website URL: $WEBSITE_URL"
+          
+
+## CREAR IAC
+
+# # Crear grupo de recursos
+# az group create \
+#   --name rg-webapp-demo \
+#   --location eastus
+
+# # Crear Storage Account
+# az storage account create \
+#   --name testdemo12345 \
+#   --resource-group rg-webapp-demo \
+#   --location eastus \
+#   --sku Standard_LRS \
+#   --kind StorageV2
+
+# # Habilitar Static Website
+# az storage blob service-properties update \
+#   --account-name testdemo12345 \
+#   --static-website \
+#   --index-document index.html \
+#   --404-document index.html

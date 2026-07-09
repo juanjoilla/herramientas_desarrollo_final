@@ -1,0 +1,23 @@
+{
+  "name": "azure-static-site",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Sitio web estatico de ejemplo listo para desplegar en Azure Storage Account (Static Website Hosting)",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "lint": "eslint src --ext .js"
+  },
+  "devDependencies": {
+    "vite": "^5.4.11",
+    "vitest": "^2.1.8",
+    "@vitest/coverage-v8": "^2.1.8",
+    "jsdom": "^25.0.1",
+    "eslint": "^8.57.1"
+  }
+}
